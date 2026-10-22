@@ -1,0 +1,7 @@
+name: astrbot_plugin_agm_usage
+display_name: AGM 用量查询
+desc: 通过 /agm 查询 Antigravity Tools (AGM) 的当日/本周/累计 Token 消耗与各账号额度状态
+short_desc: 一条指令查 AGM 用量与账号额度
+version: v0.1.0
+author: umeabc
+repo: https://github.com/umeabc/astrbot-plugin-agm-usage

@@ -1,0 +1,83 @@
+{
+  "base_url": {
+    "type": "string",
+    "default": "http://127.0.0.1:8045",
+    "description": "AGM 管理 API 源站（仅协议+主机+端口）。"
+  },
+  "admin_password": {
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "description": "AGM 管理密码，用于 Authorization: Bearer 认证；仅后台填写，留空则查询失败。"
+  },
+  "instance_name": {
+    "type": "string",
+    "default": "AGM",
+    "description": "报表标题实例名。"
+  },
+  "timeout_seconds": {
+    "type": "float",
+    "default": 10.0,
+    "description": "HTTP 总超时（秒），有效范围 1..60。"
+  },
+  "default_timezone": {
+    "type": "string",
+    "default": "Asia/Shanghai",
+    "description": "统计日/周边界的 IANA 时区名。"
+  },
+  "allowed_users": {
+    "type": "list",
+    "default": [],
+    "description": "允许查询 /agm 的用户 ID；空 = 拒绝所有非管理员。"
+  },
+  "allowed_groups": {
+    "type": "list",
+    "default": [],
+    "description": "允许查询 /agm 的群 ID；群聊非管理员要求用户与群同时命中。"
+  },
+  "allow_admin": {
+    "type": "bool",
+    "default": true,
+    "description": "允许管理员绕过用户/群白名单。"
+  },
+  "allow_private": {
+    "type": "bool",
+    "default": true,
+    "description": "是否允许私聊查询 /agm。"
+  },
+  "cooldown_seconds": {
+    "type": "int",
+    "default": 10,
+    "description": "同一发送者的查询间隔（秒），0..3600；/agmdiag 也受此限制。"
+  },
+  "max_lines_per_message": {
+    "type": "int",
+    "default": 30,
+    "description": "单条消息最大行数（含分页前缀），5..100。"
+  },
+  "max_message_chars": {
+    "type": "int",
+    "default": 1800,
+    "description": "单条消息最大字符数（含前缀），300..4000。"
+  },
+  "max_response_bytes": {
+    "type": "int",
+    "default": 5242880,
+    "description": "响应体最大字节数，超过即拒绝，65536..52428800。"
+  },
+  "mask_email": {
+    "type": "bool",
+    "default": true,
+    "description": "是否对账号邮箱打码（如 s***e@***.com）。"
+  },
+  "show_model_breakdown": {
+    "type": "bool",
+    "default": true,
+    "description": "是否在账号区之后输出「模型消耗（近 24 小时 / 近一周）」小节。"
+  },
+  "enable_diag": {
+    "type": "bool",
+    "default": true,
+    "description": "是否允许触发 /agmdiag 诊断命令；关闭后该命令只回复固定提示，不联网。"
+  }
+}
