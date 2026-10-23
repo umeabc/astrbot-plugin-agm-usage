@@ -122,6 +122,10 @@ def parse_config(raw: Mapping) -> ParsedConfig:
 
     instance_name = str(raw.get("instance_name", "") or "").strip() or "AGM"
 
+    account_label = str(raw.get("account_label", "") or "short_id").strip().lower()
+    if account_label not in ("short_id", "masked_email", "email"):
+        account_label = "short_id"
+
     return ParsedConfig(
         base_url=base_url,
         admin_password=password,
@@ -136,7 +140,7 @@ def parse_config(raw: Mapping) -> ParsedConfig:
         max_lines_per_message=int(max_lines),
         max_message_chars=int(max_chars),
         max_response_bytes=int(max_bytes),
-        mask_email=bool(raw.get("mask_email", True)),
+        account_label=account_label,
         show_model_breakdown=bool(raw.get("show_model_breakdown", True)),
         warnings=tuple(warnings),
         valid=valid,
@@ -145,22 +149,56 @@ def parse_config(raw: Mapping) -> ParsedConfig:
 
 # ---- masking ----------------------------------------------------------------
 
-def mask_email(email: str, mask: bool = True) -> str:
-    """Mask an email per contract C.7; empty email -> '—'."""
+def mask_email(email: str, mode: str = "ellipsis") -> str:
+    """Mask an email using ellipsis (…) to avoid Markdown issues; empty email -> '—'.
+    
+    Modes:
+    - 'ellipsis': s…e@…com (safe for Markdown)
+    - 'raw': return email as-is
+    """
     if not email:
         return "—"
-    if not mask:
+    if mode == "raw":
         return email
     if "@" not in email:
         return email
     local, _, domain = email.partition("@")
+    # local: first char + … + last char (or just first + … if len < 3)
     if len(local) < 3:
-        masked_local = local[0] + "***" if local else "***"
+        masked_local = local[0] + "…" if local else "…"
     else:
-        masked_local = local[0] + "***" + local[-1]
+        masked_local = local[0] + "…" + local[-1]
+    # domain: … + . + last segment (or just …. + last if it's the only part)
     domain_parts = domain.split(".")
-    masked_domain = "***." + domain_parts[-1] if domain_parts else "***"
+    if len(domain_parts) > 1:
+        masked_domain = "…." + domain_parts[-1]
+    else:
+        masked_domain = "…"
     return f"{masked_local}@{masked_domain}"
+
+
+def get_account_label(account: AccountInfo, mode: str = "short_id") -> str:
+    """Get account label per mode: short_id (UUID[:8]), masked_email, or email.
+    
+    Returns '—' if identifier unavailable in the requested mode.
+    """
+    if mode == "short_id":
+        account_id = (account.id or "").strip()
+        if not account_id:
+            return "—"
+        return account_id[:8]
+    elif mode == "masked_email":
+        return mask_email(account.email, mode="ellipsis")
+    elif mode == "email":
+        if not account.email:
+            return "—"
+        return account.email
+    else:
+        # fallback to short_id
+        account_id = (account.id or "").strip()
+        if not account_id:
+            return "—"
+        return account_id[:8]
 
 
 # ---- countdown --------------------------------------------------------------
@@ -199,9 +237,12 @@ def _group_label(display_name: str) -> str:
 _WINDOW_ORDER = {"5h": 0, "weekly": 1}
 
 
-def format_account_section(account: AccountInfo, now: datetime, mask: bool = True) -> list[str]:
-    """Render one account section per contract C.4–C.6."""
-    masked = mask_email(account.email, mask)
+def format_account_section(account: AccountInfo, now: datetime, account_label: str = "short_id") -> list[str]:
+    """Render one account section per contract C.4–C.6.
+    
+    account_label mode: 'short_id' (default), 'masked_email', or 'email'.
+    """
+    label = get_account_label(account, account_label)
     tier = account.subscription_tier or "—"
     markers = ""
     if account.disabled:
@@ -210,7 +251,7 @@ def format_account_section(account: AccountInfo, now: datetime, mask: bool = Tru
         markers += " [已封禁]"
     if account.validation_blocked:
         markers += " [校验阻塞]"
-    lines = [f"{masked} ({tier}) ：{markers}"]
+    lines = [f"{label} ({tier}) ：{markers}"]
     if account.quota is None or not account.quota_groups:
         lines.append("额度数据不可用")
         return lines
@@ -252,7 +293,7 @@ def merge_model_windows(models24, models168):
     return tuple(rows)
 
 
-def format_report(report: UsageReport, mask: bool = True, show_models: bool = True) -> str:
+def format_report(report: UsageReport, account_label: str = "short_id", show_models: bool = True) -> str:
     """Render the /agm report text per contract C."""
     lines = [
         "Antigravity Tools 消耗情况",
@@ -265,7 +306,7 @@ def format_report(report: UsageReport, mask: bool = True, show_models: bool = Tr
         raise AGMSchemaError("accounts unavailable")
     lines.append(f"账号（{len(report.accounts)}）：")
     for account in report.accounts:
-        lines.extend(format_account_section(account, report.window.as_of, mask))
+        lines.extend(format_account_section(account, report.window.as_of, account_label))
     if show_models:
         if report.models is None:
             lines.append(f"{MODEL_HEADER}：—")
@@ -281,7 +322,7 @@ def format_report(report: UsageReport, mask: bool = True, show_models: bool = Tr
 
 def paginate(lines: Sequence[str], max_lines: int, max_chars: int, label: str = "AGM") -> list[str]:
     """Split lines into pages of at most max_lines physical lines and
-    max_message_chars characters including the ``[AGM i/N] `` prefix.
+    max_message_chars characters. Prefix only added when total pages > 1.
     Nothing is dropped or truncated."""
     max_lines = max(1, int(max_lines))
     max_chars = max(1, int(max_chars))
@@ -315,11 +356,15 @@ def paginate(lines: Sequence[str], max_lines: int, max_chars: int, label: str = 
         pages.append(current)
 
     total = len(pages)
-    return [f"[{label} {i}/{total}] " + "\n".join(page) for i, page in enumerate(pages, start=1)]
+    # Only add prefix if there are multiple pages
+    if total == 1:
+        return ["\n".join(pages[0])]
+    else:
+        return [f"[{label} {i}/{total}] " + "\n".join(page) for i, page in enumerate(pages, start=1)]
 
 
-def render_messages(report: UsageReport, mask: bool, show_models: bool,
-                    max_lines: int, max_chars: int) -> list[str]:
+def render_messages(report: UsageReport, account_label: str = "short_id", show_models: bool = True,
+                    max_lines: int = 30, max_chars: int = 1800) -> list[str]:
     """One-shot helper: format the report and paginate it."""
-    text = format_report(report, mask, show_models)
+    text = format_report(report, account_label, show_models)
     return paginate(text.split("\n"), max_lines, max_chars)

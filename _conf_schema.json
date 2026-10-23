@@ -65,10 +65,10 @@
     "default": 5242880,
     "description": "响应体最大字节数，超过即拒绝，65536..52428800。"
   },
-  "mask_email": {
-    "type": "bool",
-    "default": true,
-    "description": "是否对账号邮箱打码（如 s***e@***.com）。"
+  "account_label": {
+    "type": "string",
+    "default": "short_id",
+    "description": "账号标识显示方式。取值：'short_id'（默认，取 UUID 前 8 字符）、'masked_email'（邮箱打码用…，如 s…e@…com）、'email'（明文邮箱）。"
   },
   "show_model_breakdown": {
     "type": "bool",

@@ -153,7 +153,9 @@ async def test_accounts_payload_rendered(stub_agm):
     outs = await collect(plugin.agm(ev))
     text = outs[0][1]
     assert "账号（2）：" in text
-    assert "s***e@***.com (PRO) ：" in text
+    # default account_label is 'short_id' (UUID[:8])
+    assert "a1 (PRO) ：" in text
+    assert "a2 (—) ： [已禁用]" in text
     assert "额度数据不可用" in text
     assert "[已禁用]" in text
     assert re.search(r"模型消耗（近 24 小时 / 近一周）：\ngemini-3\.8-flash-high：782,939 / 12,345,678 Token", text)

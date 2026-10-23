@@ -32,7 +32,7 @@ AstrBot 插件：通过 `/agm` 查询 Antigravity Tools (AGM) 管理 API 的 Tok
 | `cooldown_seconds` | 每发送者冷却（0..3600，默认 10）；`/agmdiag` 也受限 |
 | `max_lines_per_message` / `max_message_chars` | 分页阈值（默认 30 行 / 1800 字符） |
 | `max_response_bytes` | 响应体上限（默认 5MB） |
-| `mask_email` | 邮箱打码（默认 true，`someone@example.com` → `s***e@***.com`） |
+| `account_label` | 账号标识方式（默认 `short_id`）：<br/>- `short_id`：UUID 前 8 字符（如 `a2e409cf`）<br/>- `masked_email`：邮箱打码用 `…`，如 `s…e@….com`（避免 Markdown 渲染问题）<br/>- `email`：完整邮箱（明确暴露地址，谨慎使用） |
 | `show_model_breakdown` | 是否输出「模型消耗（近 24 小时 / 近一周）」小节（默认 true） |
 | `enable_diag` | 是否允许触发 `/agmdiag`；关闭后只回复固定提示，不联网（默认 true） |
 
@@ -40,7 +40,9 @@ AstrBot 插件：通过 `/agm` 查询 Antigravity Tools (AGM) 管理 API 的 Tok
 
 - `/agm` — 消耗报表。输出固定模板：当日 / 本周 / 累计 Token（千分位）、
   全部账号（含禁用/封禁/校验阻塞/quota=null）的 Gemini/Claude 等分组额度百分比
-  与重置倒计时、当日分模型消耗。白名单受限；超长自动按 `[AGM i/N] ` 分页，不丢字符。
+  与重置倒计时、模型「近 24 小时 / 近一周」双窗口消耗。账号默认用 UUID 前 8 位标识
+  （`account_label` 可改为打码邮箱或明文邮箱），输出不含 Markdown 触发符。
+  白名单受限；超长才分页并加 `[AGM i/N] ` 前缀（单页不加），不丢字符。
 - `/agmdiag` — 诊断。**不受白名单限制**，但受冷却限制；可通过 `enable_diag` 关闭
   （关闭后只回复固定提示，不联网）。输出配置有效性、base_url、
   认证结果、health/version、每个请求的状态与耗时、H/HW、daily 交叉核验差值。

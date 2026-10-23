@@ -33,6 +33,7 @@ from astrbot_plugin_agm_usage.reporting import (
     paginate,
     parse_config,
     pick_error_text,
+    render_messages,
 )
 
 
@@ -68,10 +69,10 @@ def test_timezone_utc_and_dst_and_naive_rejected():
 # -- masking ---------------------------------------------------------------
 
 def test_email_mask_rules():
-    assert mask_email("someone@example.com") == "s***e@***.com"
-    assert mask_email("ab@x.com") == "a***@***.com"  # short local part
-    assert mask_email("a@x.com") == "a***@***.com"
-    assert mask_email("user@example.com", mask=False) == "user@example.com"
+    assert mask_email("someone@example.com") == "s…e@….com"
+    assert mask_email("ab@x.com") == "a…@….com"  # short local part
+    assert mask_email("a@x.com") == "a…@….com"
+    assert mask_email("user@example.com", mode="raw") == "user@example.com"
     assert mask_email("") == "—"
 
 
@@ -110,8 +111,8 @@ def test_quota_groups_render_and_countdown():
         QuotaBucket("5h", 0.5, now + timedelta(hours=1)),
         QuotaBucket("weekly", 0.25, now + timedelta(days=1)),
     ))
-    lines = format_account_section(_acct(groups=[gem, claude]), now)
-    assert lines[0] == "s***e@***.com (PRO) ："
+    lines = format_account_section(_acct(groups=[gem, claude]), now, account_label="short_id")
+    assert lines[0] == "a1 (PRO) ："
     assert lines[1] == "Gemini:"
     assert lines[2] == "5小时剩余 98%（4小时42分后重置）"   # 5h before weekly
     assert lines[3] == "本周剩余 87%（6天22小时42分后重置）"
@@ -121,12 +122,12 @@ def test_quota_groups_render_and_countdown():
 
 def test_account_status_markers_and_no_quota():
     now = datetime(2026, 10, 22, 12, 0, tzinfo=dt_timezone.utc)
-    lines = format_account_section(_acct(disabled=True, forbidden=True, blocked=True), now)
-    assert lines[0] == "s***e@***.com (PRO) ： [已禁用] [已封禁] [校验阻塞]"
-    lines = format_account_section(_acct(quota=None), now)
-    assert lines == ["s***e@***.com (PRO) ：", "额度数据不可用"]
-    lines = format_account_section(_acct(groups=[], quota={}), now)
-    assert lines == ["s***e@***.com (PRO) ：", "额度数据不可用"]
+    lines = format_account_section(_acct(disabled=True, forbidden=True, blocked=True), now, account_label="short_id")
+    assert lines[0] == "a1 (PRO) ： [已禁用] [已封禁] [校验阻塞]"
+    lines = format_account_section(_acct(quota=None), now, account_label="short_id")
+    assert lines == ["a1 (PRO) ：", "额度数据不可用"]
+    lines = format_account_section(_acct(groups=[], quota={}), now, account_label="short_id")
+    assert lines == ["a1 (PRO) ：", "额度数据不可用"]
 
 
 def test_tier_missing_dash_and_custom_group():
@@ -134,8 +135,8 @@ def test_tier_missing_dash_and_custom_group():
     acct = AccountInfo(id="a", email="", name="", quota={}, quota_groups=(
         QuotaGroup("Other Models", (QuotaBucket("daily", 0.5, now + timedelta(hours=2)),)),
     ), subscription_tier=None)
-    lines = format_account_section(acct, now)
-    assert lines[0] == "— (—) ："
+    lines = format_account_section(acct, now, account_label="short_id")
+    assert lines[0] == "a (—) ："
     assert lines[1] == "Other Models:"
     assert lines[2].startswith("daily剩余 50%")
 
@@ -160,7 +161,7 @@ def test_exact_template_snapshot():
         QuotaBucket("weekly", 0.8, now + timedelta(days=2)),
     ))
     acct = _acct(groups=[gem, claude])
-    text = format_report(_report([acct], models=(("gemini-3.8-flash-high", 782939, 12345678),)))
+    text = format_report(_report([acct], models=(("gemini-3.8-flash-high", 782939, 12345678),)), account_label="short_id")
     expected = "\n".join([
         "Antigravity Tools 消耗情况",
         "2026-10-22",
@@ -168,7 +169,7 @@ def test_exact_template_snapshot():
         "本周已消耗 Token：1,000,000",
         "累计消耗 Token：99,999,999",
         "账号（1）：",
-        "s***e@***.com (PRO) ：",
+        "a1 (PRO) ：",
         "Gemini:",
         "5小时剩余 98%（4小时42分后重置）",
         "本周剩余 87%（6天22小时42分后重置）",
@@ -186,7 +187,7 @@ def test_model_zero_hidden_sort_exact_names():
         [("b-model", 50), ("a-model", 50), ("zero", 0)],
         [("b-model", 60), ("a-model", 40), ("zero", 0)],
     )
-    text = format_report(_report([_acct(groups=[QuotaGroup("G", ())])], models=rows))
+    text = format_report(_report([_acct(groups=[QuotaGroup("G", ())])], models=rows), account_label="short_id")
     lines = text.split("\n")
     assert "zero：0" not in text
     body = lines[lines.index("模型消耗（近 24 小时 / 近一周）：") + 1:lines.index("模型消耗（近 24 小时 / 近一周）：") + 3]
@@ -196,17 +197,17 @@ def test_model_zero_hidden_sort_exact_names():
 
 
 def test_models_empty_and_failed_states():
-    text = format_report(_report([_acct(groups=[QuotaGroup("G", ())])], models=()))
+    text = format_report(_report([_acct(groups=[QuotaGroup("G", ())])], models=()), account_label="short_id")
     assert "模型消耗（近 24 小时 / 近一周）：无" in text
-    text = format_report(_report([_acct(groups=[QuotaGroup("G", ())])], models=None))
+    text = format_report(_report([_acct(groups=[QuotaGroup("G", ())])], models=None), account_label="short_id")
     assert "模型消耗（近 24 小时 / 近一周）：—" in text
-    text = format_report(_report([_acct(groups=[QuotaGroup("G", ())])], today=None))
+    text = format_report(_report([_acct(groups=[QuotaGroup("G", ())])], today=None), account_label="short_id")
     assert "当日已消耗 Token：—" in text
 
 
 def test_accounts_unavailable_raises():
     with pytest.raises(AGMSchemaError):
-        format_report(_report(None))
+        format_report(_report(None), account_label="short_id")
 
 
 # -- pagination ---------------------------------------------------------------
@@ -219,9 +220,9 @@ def test_pagination_no_loss():
     joined = "".join(pages)
     for i in range(10):
         assert f"line-{i}" in joined
-    # prefix always present even for single page
+    # single page has NO prefix
     one = paginate(["a", "b"], 30, 1800)
-    assert len(one) == 1 and one[0].startswith("[AGM 1/1] ")
+    assert len(one) == 1 and not one[0].startswith("[AGM")
 
 
 def test_pagination_long_line_and_limits():
@@ -283,7 +284,7 @@ def test_models_two_windows_union_and_sort():
     # sort: 24h desc dominates -> B(200), A(100), C(0); 7d only breaks ties
     assert rows == (("B", 200.0, 300.0), ("A", 100.0, 0.0), ("C", 0.0, 400.0))
     assert [m for m, _, _ in rows] == ["B", "A", "C"]
-    text = format_report(_report([_acct(groups=[QuotaGroup("G", ())])], models=rows))
+    text = format_report(_report([_acct(groups=[QuotaGroup("G", ())])], models=rows), account_label="short_id")
     body = text.split("模型消耗（近 24 小时 / 近一周）：\n")[1].split("\n")
     assert body[0] == "B：200 / 300 Token"
     assert body[1] == "A：100 / 0 Token"
@@ -304,7 +305,7 @@ def test_models_both_zero_hidden():
 
 def test_models_zero_displays_plain_zero():
     rows = merge_model_windows([("A", 0)], [("A", 0)])
-    text = format_report(_report([_acct(groups=[QuotaGroup("G", ())])], models=rows))
+    text = format_report(_report([_acct(groups=[QuotaGroup("G", ())])], models=rows), account_label="short_id")
     assert "A：0 / 0 Token" not in text  # both zero -> hidden entirely
 
 
@@ -318,3 +319,153 @@ def test_models_sort_tie_7d_then_name():
 
 def test_models_empty_both_windows():
     assert merge_model_windows([], []) == ()
+
+
+# ---- pagination: single page has no prefix ------------------------------------
+
+def test_single_page_has_no_prefix():
+    """Single-page pagination should NOT include [AGM 1/1] prefix."""
+    now = _aware(2026, 10, 22, 12, 0, 0)
+    gem = QuotaGroup("Gemini Models", (
+        QuotaBucket("weekly", 0.87334895, now + timedelta(days=6, hours=22, minutes=42)),
+        QuotaBucket("5h", 0.977411, now + timedelta(hours=4, minutes=42)),
+    ))
+    acct = _acct(groups=[gem])
+    report = _report([acct], models=())
+    pages = render_messages(report, account_label="short_id", show_models=True, max_lines=50, max_chars=5000)
+    assert len(pages) == 1
+    assert not pages[0].startswith("[AGM")
+    assert pages[0].startswith("Antigravity Tools 消耗情况")
+
+
+def test_multi_page_keeps_prefix_and_no_loss():
+    """Multi-page pagination MUST include [AGM i/N] prefix and preserve characters."""
+    now = _aware(2026, 10, 22, 12, 0, 0)
+    gem = QuotaGroup("Gemini Models", (
+        QuotaBucket("weekly", 0.87334895, now + timedelta(days=6, hours=22, minutes=42)),
+        QuotaBucket("5h", 0.977411, now + timedelta(hours=4, minutes=42)),
+    ))
+    acct = _acct(groups=[gem])
+    report = _report([acct], models=(("gemini-3.8-flash-high", 782939, 12345678),))
+    # Force small limits to produce multiple pages
+    pages = render_messages(report, account_label="short_id", show_models=True, max_lines=5, max_chars=200)
+    assert len(pages) > 1
+    # Each page should have prefix
+    for i, page in enumerate(pages, start=1):
+        assert page.startswith(f"[AGM {i}/{len(pages)}] ")
+    # Verify key content appears in pages
+    full_text = "".join(pages)
+    assert "Antigravity Tools 消耗情况" in full_text
+    assert "2026-10-22" in full_text
+    assert "a1 (PRO)" in full_text  # account with short_id
+    assert "gemini-3.8-flash-high" in full_text
+
+
+def test_diag_single_page_has_no_prefix():
+    """单页诊断也不应有分页前缀。"""
+    # This test verifies the behavior for /agmdiag - but that's in main.py
+    # We test the principle: paginate returns single item without prefix
+    lines = ["[AGM 诊断]", "line1", "line2"]
+    pages = paginate(lines, max_lines=50, max_chars=5000, label="AGM诊断")
+    assert len(pages) == 1
+    assert not pages[0].startswith("[AGM诊断")
+
+
+# ---- account label modes -------------------------------------------------------
+
+def test_account_label_short_id_default():
+    """Default account_label is 'short_id', showing UUID[:8]."""
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=dt_timezone.utc)
+    acct = AccountInfo(
+        id="a2e409cf-d90f-4ed2-a52b-328beb5d8945",
+        email="test@example.com",
+        name="test",
+        quota={}, quota_groups=(QuotaGroup("G", ()),),
+        subscription_tier="PRO"
+    )
+    lines = format_account_section(acct, now, account_label="short_id")
+    assert lines[0].startswith("a2e409cf (PRO)")
+
+
+def test_account_label_short_id_edge():
+    """Edge cases: empty id -> '—', id < 8 chars -> use entire id."""
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=dt_timezone.utc)
+    # Empty id
+    acct = AccountInfo(id="", email="", name="", quota={}, quota_groups=(QuotaGroup("G", ()),), subscription_tier="PRO")
+    lines = format_account_section(acct, now, account_label="short_id")
+    assert lines[0].startswith("— (PRO)")
+    # Short id
+    acct = AccountInfo(id="abc123", email="", name="", quota={}, quota_groups=(QuotaGroup("G", ()),), subscription_tier="PRO")
+    lines = format_account_section(acct, now, account_label="short_id")
+    assert lines[0].startswith("abc123 (PRO)")
+
+
+def test_account_label_masked_email_uses_ellipsis():
+    """masked_email mode uses … (not *) to avoid Markdown issues."""
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=dt_timezone.utc)
+    acct = AccountInfo(
+        id="a2e409cf-d90f-4ed2-a52b-328beb5d8945",
+        email="someone@example.com",
+        name="test",
+        quota={}, quota_groups=(QuotaGroup("G", ()),),
+        subscription_tier="PRO"
+    )
+    lines = format_account_section(acct, now, account_label="masked_email")
+    assert lines[0] == "s…e@….com (PRO) ："
+    assert "*" not in lines[0]  # no asterisks
+    
+    # Verify full report output also avoids *
+    report = _report([acct], models=())
+    text = format_report(report, account_label="masked_email")
+    assert "*" not in text
+
+
+def test_account_label_email_raw():
+    """email mode outputs full email address."""
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=dt_timezone.utc)
+    acct = AccountInfo(
+        id="a2e409cf-d90f-4ed2-a52b-328beb5d8945",
+        email="someone@example.com",
+        name="test",
+        quota={}, quota_groups=(QuotaGroup("G", ()),),
+        subscription_tier="PRO"
+    )
+    lines = format_account_section(acct, now, account_label="email")
+    assert lines[0] == "someone@example.com (PRO) ："
+
+
+def test_output_contains_no_markdown_markers():
+    """Full /agm output must not contain Markdown-triggering characters."""
+    now = _aware(2026, 10, 22, 12, 0, 0)
+    gem = QuotaGroup("Gemini Models", (
+        QuotaBucket("weekly", 0.87334895, now + timedelta(days=6, hours=22, minutes=42)),
+        QuotaBucket("5h", 0.977411, now + timedelta(hours=4, minutes=42)),
+    ))
+    acct = AccountInfo(
+        id="a2e409cf-d90f-4ed2-a52b-328beb5d8945",
+        email="someone@example.com",
+        name="test",
+        quota={},
+        quota_groups=(gem,),
+        subscription_tier="PRO"
+    )
+    report = _report([acct], models=(("gemini-3.8-flash-high", 100, 200),))
+    text = format_report(report, account_label="short_id")
+    
+    # Check for Markdown markers
+    assert "**" not in text  # bold
+    assert "__" not in text  # alt bold
+    assert "~~" not in text  # strikethrough
+    assert "`" not in text   # code (single backtick)
+    # Line-start markers (only after newlines)
+    lines = text.split("\n")
+    for line in lines:
+        if line.startswith("#"):
+            assert False, f"Found heading marker in: {line}"
+        if line.startswith(">"):
+            assert False, f"Found blockquote marker in: {line}"
+        if line.startswith("- ") or line.startswith("+ ") or line.startswith("* "):
+            # But lines like "5小时剩余 98%..." are OK if they don't match list pattern
+            # We're checking for actual list markers at line start
+            assert False, f"Found list marker in: {line}"
+    # [已禁用] style markers are allowed (not Markdown syntax)

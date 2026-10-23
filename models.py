@@ -91,7 +91,7 @@ class ParsedConfig:
     max_lines_per_message: int = 30
     max_message_chars: int = 1800
     max_response_bytes: int = 5242880
-    mask_email: bool = True
+    account_label: str = "short_id"
     show_model_breakdown: bool = True
     warnings: Tuple[str, ...] = field(default_factory=tuple)
     valid: bool = False

@@ -320,7 +320,7 @@ class AGMUsagePlugin(Star):
             else:
                 for page in render_messages(
                     report,
-                    mask=self._parsed.mask_email,
+                    account_label=self._parsed.account_label,
                     show_models=self._parsed.show_model_breakdown,
                     max_lines=self._parsed.max_lines_per_message,
                     max_chars=self._parsed.max_message_chars,
