@@ -75,6 +75,16 @@
     "default": true,
     "description": "是否在账号区之后输出「模型消耗（近 24 小时 / 近一周）」小节。"
   },
+  "update_notice": {
+    "type": "bool",
+    "default": true,
+    "description": "在 /agm 末尾提示 AGM 自身有新版本（需 AGM 所在机器能访问 GitHub）。"
+  },
+  "update_check_interval_hours": {
+    "type": "int",
+    "default": 6,
+    "description": "后台检查 AGM 新版本的最小间隔（小时），有效范围 1..168。"
+  },
   "enable_diag": {
     "type": "bool",
     "default": true,

@@ -3,7 +3,12 @@
 Lifecycle mirrors astrbot_plugin_workbuddy_usage: one aiohttp ClientSession is
 created in initialize() and closed in terminate(). Authorization runs BEFORE
 any network request. /agmdiag bypasses the user/group allowlists but keeps the
-cooldown. Read-only GET admin API only.
+cooldown.
+
+Read-only against AGM state: every report request is a GET, plus at most one
+POST /api/system/updates/check (AGM asks GitHub for its own latest version and
+returns it without persisting anything). No AGM mutation endpoint is ever
+called.
 """
 from __future__ import annotations
 
@@ -36,7 +41,9 @@ from .reporting import (
     ERR_COOLDOWN,
     ERR_INTERNAL,
     ERR_UNAUTHORIZED,
+    derive_update_notice,
     merge_model_windows,
+    notice_version,
     parse_config,
     pick_error_text,
     render_messages,
@@ -51,6 +58,10 @@ class AGMReportError(Exception):
 
 
 ERR_DIAG_DISABLED = "诊断命令已关闭。"
+
+# /agmdiag notice-state strings (offline; no extra request made for these).
+DIAG_UPDATE_OFF = "AGM 更新提示: 已关闭"
+DIAG_UPDATE_NONE = "AGM 更新提示: 无或未知（尚未拿到版本数据）"
 
 
 ERROR_CLASS_TO_CODE = {
@@ -105,6 +116,12 @@ class AGMUsagePlugin(Star):
         self._parsed = None  # ParsedConfig
         self._last_query: dict = {}  # (platform, sender) -> monotonic ts
         self._busy = False
+        # AGM update-notice state (in-memory only, never persisted): the last
+        # derived notice ("" = none known), the monotonic timestamp of the last
+        # background check we fired, and the single in-flight task handle.
+        self._update_notice: str = ""
+        self._last_update_check_ts: float | None = None
+        self._update_check_task: Optional[asyncio.Task] = None
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -130,6 +147,16 @@ class AGMUsagePlugin(Star):
         logger.info("agm_usage initialized")
 
     async def terminate(self) -> None:
+        # Cancel/await a pending background update check FIRST so it never
+        # touches a closed session; safe when none was ever created.
+        task = self._update_check_task
+        self._update_check_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         session = self._session
         self._session = None
         self._client = None
@@ -197,6 +224,77 @@ class AGMUsagePlugin(Star):
         return True
 
     # -- report ----------------------------------------------------------------
+
+    # -- AGM update notice -------------------------------------------------------
+
+    def _cfg_update_notice_enabled(self) -> bool:
+        return bool(self._parsed.update_notice) if self._parsed is not None else False
+
+    def _maybe_schedule_update_check(self) -> None:
+        """Fire-and-forget background POST /api/system/updates/check.
+
+        Time-throttled on a monotonic clock (not gated on "no data yet"): a
+        failing or unreachable GitHub lookup must never cause a request storm,
+        so the timestamp is stamped the moment we fire. Conditions, ALL needed:
+        - update_notice config is true;
+        - no check is currently in flight in this process;
+        - our own monotonic timestamp is absent or older than the interval.
+        The task swallows ALL exceptions: a failed update check must never
+        surface to the user (it is logged at info once).
+        """
+        if not self._cfg_update_notice_enabled():
+            return
+        if self._update_check_task is not None and not self._update_check_task.done():
+            return
+        assert self._parsed is not None
+        interval_hours = self._parsed.update_check_interval_hours
+        now_mono = time.monotonic()
+        if (
+            self._last_update_check_ts is not None
+            and (now_mono - self._last_update_check_ts) < interval_hours * 3600
+        ):
+            return
+        client = self._client
+        if client is None:
+            return
+        self._last_update_check_ts = now_mono
+        self._update_check_task = asyncio.get_running_loop().create_task(
+            self._background_update_check(client)
+        )
+
+    async def _background_update_check(self, client: AGMClient) -> None:
+        """Run one AGM-side update check; on success remember the derived
+        notice for the NEXT /agm. Never raises — every failure is logged and
+        dropped. Always discards its own task handle so a later call can
+        schedule again."""
+        try:
+            result = await client.check_updates()
+            self._update_notice = derive_update_notice(result.value)
+            logger.info(
+                "agm_usage: background AGM update check done (notice=%s)",
+                bool(self._update_notice),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - never fatal, never shown
+            logger.info(
+                "agm_usage: background AGM update check failed (ignored): %s",
+                type(exc).__name__,
+            )
+        finally:
+            # Drop the handle so the next throttled window can schedule again;
+            # the identity check leaves a newer task's handle untouched.
+            if self._update_check_task is asyncio.current_task():
+                self._update_check_task = None
+
+    def report_notice(self) -> str:
+        """The current in-memory AGM-update notice ("" = none).
+
+        The background check sets it between /agm calls; it appears on the
+        NEXT report, never retroactively. Kept as a method for clean test
+        injection.
+        """
+        return self._update_notice
 
     async def build_report(self, now: datetime) -> UsageReport:
         """Concurrent read-only GETs; independent degradation per plan §4.5."""
@@ -318,12 +416,17 @@ class AGMUsagePlugin(Star):
                 logger.exception("agm_usage: unexpected error")
                 yield event.plain_result(ERR_INTERNAL)
             else:
+                # Schedule (throttled, background) the AGM update check AFTER
+                # this report was built: its result shows on the NEXT /agm,
+                # so one reply is never delayed by the GitHub lookup.
+                self._maybe_schedule_update_check()
                 for page in render_messages(
                     report,
                     account_label=self._parsed.account_label,
                     show_models=self._parsed.show_model_breakdown,
                     max_lines=self._parsed.max_lines_per_message,
                     max_chars=self._parsed.max_message_chars,
+                    notice=self.report_notice(),
                 ):
                     yield event.plain_result(page)
         finally:
@@ -466,6 +569,15 @@ class AGMUsagePlugin(Star):
         # clock skew
         import email.utils as _eu
         lines.append(f"本机时间: {now.isoformat()}")
+        # AGM update notice state — OFFLINE (no extra request is made here; the
+        # value was captured by a previous /agm's background check).
+        if not self._cfg_update_notice_enabled():
+            lines.append(DIAG_UPDATE_OFF)
+        elif self._update_notice:
+            version = notice_version(self._update_notice)
+            lines.append(f"AGM 更新提示: 有 v{version}" if version else DIAG_UPDATE_NONE)
+        else:
+            lines.append(DIAG_UPDATE_NONE)
         return lines
 
     @staticmethod

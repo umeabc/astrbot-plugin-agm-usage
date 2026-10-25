@@ -48,6 +48,10 @@ class AccountInfo:
     quota_groups: Tuple[QuotaGroup, ...] = ()
     subscription_tier: str | None = None
     is_forbidden: bool = False
+    # AGM >= 5.0.0 (additive): per-account QoS state and remaining jail time.
+    # Absent on older AGM -> None, which renders no marker at all.
+    qos_status: str | None = None
+    qos_reset_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,8 @@ class ParsedConfig:
     max_response_bytes: int = 5242880
     account_label: str = "short_id"
     show_model_breakdown: bool = True
+    update_notice: bool = True
+    update_check_interval_hours: int = 6
     warnings: Tuple[str, ...] = field(default_factory=tuple)
     valid: bool = False
 

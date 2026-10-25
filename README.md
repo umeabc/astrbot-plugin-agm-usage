@@ -3,7 +3,8 @@
 仓库：https://github.com/umeabc/astrbot-plugin-agm-usage
 
 AstrBot 插件：通过 `/agm` 查询 Antigravity Tools (AGM) 管理 API 的 Token 消耗
-与各账号额度状态；`/agmdiag` 输出诊断信息。只读 GET，绝不修改 AGM 状态。
+与各账号额度状态；`/agmdiag` 输出诊断信息。对 AGM 状态只读：报表请求全是 GET，
+唯一例外是一次只读的 `POST /api/system/updates/check`（见「AGM 更新提示」）。
 
 ## 安装
 
@@ -34,6 +35,8 @@ AstrBot 插件：通过 `/agm` 查询 Antigravity Tools (AGM) 管理 API 的 Tok
 | `max_response_bytes` | 响应体上限（默认 5MB） |
 | `account_label` | 账号标识方式（默认 `short_id`）：<br/>- `short_id`：UUID 前 8 字符（如 `a2e409cf`）<br/>- `masked_email`：邮箱打码用 `…`，如 `s…e@….com`（避免 Markdown 渲染问题）<br/>- `email`：完整邮箱（明确暴露地址，谨慎使用） |
 | `show_model_breakdown` | 是否输出「模型消耗（近 24 小时 / 近一周）」小节（默认 true） |
+| `update_notice` | 在 `/agm` 末尾提示 AGM 自身有新版本（默认 true；需 AGM 所在机器能访问 GitHub） |
+| `update_check_interval_hours` | 后台检查 AGM 新版本的最小间隔（小时，1..168，默认 6） |
 | `enable_diag` | 是否允许触发 `/agmdiag`；关闭后只回复固定提示，不联网（默认 true） |
 
 ## 命令
@@ -43,9 +46,11 @@ AstrBot 插件：通过 `/agm` 查询 Antigravity Tools (AGM) 管理 API 的 Tok
   与重置倒计时、模型「近 24 小时 / 近一周」双窗口消耗。账号默认用 UUID 前 8 位标识
   （`account_label` 可改为打码邮箱或明文邮箱），输出不含 Markdown 触发符。
   白名单受限；超长才分页并加 `[AGM i/N] ` 前缀（单页不加），不丢字符。
+  若 AGM 自身有新版本，**最后一行**会多一条「AGM 有更新，最新版本号vX.Y.Z」。
 - `/agmdiag` — 诊断。**不受白名单限制**，但受冷却限制；可通过 `enable_diag` 关闭
   （关闭后只回复固定提示，不联网）。输出配置有效性、base_url、
-  认证结果、health/version、每个请求的状态与耗时、H/HW、daily 交叉核验差值。
+  认证结果、health/version、每个请求的状态与耗时、H/HW、daily 交叉核验差值、
+  以及当前 AGM 更新提示的缓存状态（离线读缓存，不额外请求）。
   永不打印密码、Authorization 头、完整邮箱或白名单成员。
 
 ## 统计口径（重要）
@@ -66,9 +71,47 @@ AstrBot 插件：通过 `/agm` 查询 Antigravity Tools (AGM) 管理 API 的 Tok
   自然桶的原因；滚动值仍保留在 `/agmdiag` 的交叉核验差值里。
 - `H` 向上取整、跨午夜请求共用发起时的 H 与日期。
 
+## AGM 更新提示（v0.3.0）
+
+`/agm` 报表的**最后一行**可能是：
+
+```
+AGM 有更新，最新版本号v5.0.1
+```
+
+- 只有当 AGM 报告的 `latest_version` **严格大于** `current_version` 时才显示；
+  已是最新（或版本数据缺失 / 无法解析 / 检查失败）时**什么都不打印**，
+  报表与旧版逐字节一致。AGM 自带的 `has_update` 布尔值**不被单独采信**。
+- 版本号按 `X.Y.Z` 比较，容忍一个前导 `v`、容忍 `X` / `X.Y` 这种非三段写法；
+  预发布后缀（如 `5.0.0-beta.2`）只取其数字核心，因此预发布版永远不会
+  声称比同核心的正式版更新。
+- 每次 `/agm` 成功取到报表后，插件按 `update_check_interval_hours` 的**时间节流**
+  在**后台**调用一次 `POST /api/system/updates/check`（AGM 自己去问 GitHub，
+  只读、不落盘、不装任何东西，插件也不会调用 AGM 的 `updates/touch` / `save`）。
+  结果在**下一次** `/agm` 中体现，本次回复不变。
+  之所以按时间而不是"有没有数据"来节流：检查失败也不该造成请求风暴，
+  所以发起那一刻就记时间戳。
+- 前提是 **AGM 所在机器能访问 GitHub**；不能时检查只会静默失败
+  （info 日志一行），不影响报表。
+- 关闭 `update_notice` 后，后台检查完全不发。
+
+## AGM 5.0.0 兼容性
+
+契约按 **AGM v5.0.0** 核对（2026-10-24 发布）。与 v4.9.8 相比：
+
+- `/api/stats/summary|daily|weekly|models`、`/api/health` **逐字节一致**，
+  统计口径无需改动；
+- `/api/accounts` 仅新增两个字段 `qos_status`（`suspicious` / `jailed` /
+  `probing` / `half_open`，健康时序列化为 `null`）与 `qos_reset_seconds`。
+  插件把它们渲染成账号行上的追加标记，例如：
+  `a2e409cf (PRO) ： [QoS隔离 7分后解除]`。
+  未知状态值与负数秒数一律忽略，绝不因此让整份账号列表报 schema 错。
+- 旧版 AGM 没有这两个字段 → 不显示任何标记，输出与 v0.2.0 一致。
+
 ## 无状态说明
 
-插件无持久化、无后台任务、不写任何数据目录；冷却表仅存内存（monotonic）。
+插件无持久化、不写任何数据目录；冷却表与更新提示缓存仅存内存（monotonic）。
+唯一的后台任务是那个节流的更新检查：单个在飞、`terminate()` 时取消并等待。
 
 ## 测试（完全离线）
 
@@ -83,6 +126,7 @@ python -m compileall -q .
 set AGM_ADMIN_PASSWORD=<真实密码>     # 仅环境变量，绝不写进文件
 python tools/probe_agm.py --base-url http://127.0.0.1:8045            # 摘要
 python tools/probe_agm.py --base-url http://127.0.0.1:8045 --render   # + 渲染 /agm 文本
+python tools/probe_agm.py --base-url http://127.0.0.1:8045 --check-updates  # + 版本检查结果
 ```
 
 退出码：0 正常；2 网络不可达；3 认证失败；4 响应/schema 异常；5 其他。

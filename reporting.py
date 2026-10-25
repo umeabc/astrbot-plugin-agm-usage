@@ -4,6 +4,7 @@ Pure functions — no I/O, no AstrBot dependency.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Mapping, Optional, Sequence
 
@@ -126,6 +127,10 @@ def parse_config(raw: Mapping) -> ParsedConfig:
     if account_label not in ("short_id", "masked_email", "email"):
         account_label = "short_id"
 
+    check_hours, w = _clamp(raw.get("update_check_interval_hours", 6), 1, 168, 6)
+    if w:
+        warnings.append("update_check_interval_hours 超出范围，已回退默认值")
+
     return ParsedConfig(
         base_url=base_url,
         admin_password=password,
@@ -142,6 +147,8 @@ def parse_config(raw: Mapping) -> ParsedConfig:
         max_response_bytes=int(max_bytes),
         account_label=account_label,
         show_model_breakdown=bool(raw.get("show_model_breakdown", True)),
+        update_notice=bool(raw.get("update_notice", True)),
+        update_check_interval_hours=int(check_hours),
         warnings=tuple(warnings),
         valid=valid,
     )
@@ -236,10 +243,35 @@ def _group_label(display_name: str) -> str:
 
 _WINDOW_ORDER = {"5h": 0, "weekly": 1}
 
+# AGM >= 5.0.0 QoS states (GET /api/accounts .qos_status). Healthy is serialized
+# as null by AGM, so only the four non-healthy states ever reach us.
+QOS_LABELS = {
+    "suspicious": "QoS可疑",
+    "jailed": "QoS隔离",
+    "probing": "QoS探针",
+    "half_open": "QoS缓刑",
+}
+
+
+def _format_seconds(total_seconds: int) -> str:
+    """Render a remaining-seconds count as 天/小时/分 (empty when <= 0)."""
+    total_minutes = int(total_seconds) // 60
+    days = total_minutes // (60 * 24)
+    hours = (total_minutes % (60 * 24)) // 60
+    minutes = total_minutes % 60
+    parts = []
+    if days:
+        parts.append(f"{days}天")
+    if hours:
+        parts.append(f"{hours}小时")
+    if minutes:
+        parts.append(f"{minutes}分")
+    return "".join(parts)
+
 
 def format_account_section(account: AccountInfo, now: datetime, account_label: str = "short_id") -> list[str]:
     """Render one account section per contract C.4–C.6.
-    
+
     account_label mode: 'short_id' (default), 'masked_email', or 'email'.
     """
     label = get_account_label(account, account_label)
@@ -251,6 +283,15 @@ def format_account_section(account: AccountInfo, now: datetime, account_label: s
         markers += " [已封禁]"
     if account.validation_blocked:
         markers += " [校验阻塞]"
+    if account.qos_status:
+        qos_label = QOS_LABELS.get(account.qos_status)
+        if qos_label:
+            remaining = account.qos_reset_seconds
+            if remaining is not None:
+                cd = _format_seconds(remaining)
+                markers += f" [{qos_label} {cd}后解除]" if cd else f" [{qos_label}]"
+            else:
+                markers += f" [{qos_label}]"
     lines = [f"{label} ({tier}) ：{markers}"]
     if account.quota is None or not account.quota_groups:
         lines.append("额度数据不可用")
@@ -364,7 +405,85 @@ def paginate(lines: Sequence[str], max_lines: int, max_chars: int, label: str = 
 
 
 def render_messages(report: UsageReport, account_label: str = "short_id", show_models: bool = True,
-                    max_lines: int = 30, max_chars: int = 1800) -> list[str]:
-    """One-shot helper: format the report and paginate it."""
-    text = format_report(report, account_label, show_models)
+                    max_lines: int = 30, max_chars: int = 1800,
+                    notice: str = "") -> list[str]:
+    """One-shot helper: format the report, append the update notice, paginate.
+
+    ``notice`` is "" (no notice) unless a strictly newer AGM release is known;
+    it is appended AFTER format_report so it lands on the report's last line.
+    """
+    text = append_update_notice(format_report(report, account_label, show_models), notice)
     return paginate(text.split("\n"), max_lines, max_chars)
+
+
+# ---- upstream AGM update notice --------------------------------------------
+
+_UPDATE_VERSION_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$")
+# Exact rendered AGM-update notice; {version} is the bare X.Y.Z (the plugin
+# adds the single leading v — never doubled when the source had one).
+UPDATE_NOTICE_FORMAT = "AGM 有更新，最新版本号v{version}"
+
+
+def parse_version_tuple(value: object) -> tuple[int, int, int] | None:
+    """Parse an X.Y.Z version string (tolerating one leading v/V) into a
+    comparable tuple. A bare ``X`` or ``X.Y`` is tolerated (missing parts are
+    0), because AGM's updater.json is not guaranteed to be three-part. A
+    pre-release suffix (``5.0.0-beta.2``) is dropped and only its numeric core
+    is kept, so a pre-release never claims to be newer than its own stable
+    core. Returns None for anything unparseable — never raises."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if "-" in text:
+        text = text.split("-", 1)[0].strip()
+    m = _UPDATE_VERSION_RE.match(text)
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2) or 0), int(m.group(3) or 0))
+
+
+def notice_version(notice: str) -> str:
+    """Extract the bare version from a rendered notice ("" when it is not one)."""
+    prefix = UPDATE_NOTICE_FORMAT.format(version="")
+    if not notice or not notice.startswith(prefix):
+        return ""
+    rest = notice[len(prefix):].strip()
+    return rest[1:] if rest.startswith("v") else rest
+
+
+def derive_update_notice(updates: Mapping | None) -> str:
+    """Decide the AGM-update notice line from a POST /api/system/updates/check
+    payload (AGM's UpdateInfo struct).
+
+    Returns the notice string ONLY when a genuinely newer release is known:
+    both ``current_version`` and ``latest_version`` must parse and the latter
+    must be strictly greater (tuple compare). AGM's own ``has_update`` boolean
+    is deliberately NOT trusted alone — it is computed by AGM's semver helper,
+    which we do not mirror (and must not depend on). Any other shape yields ""
+    (no notice), never an exception.
+
+    AGM versions may carry a pre-release suffix (``5.0.0-beta.2``). A
+    pre-release is parsed as its numeric core and therefore never claims to be
+    newer than the same stable core; a newer core always wins.
+    """
+    if not isinstance(updates, Mapping):
+        return ""
+    candidate = parse_version_tuple(updates.get("latest_version"))
+    current = parse_version_tuple(updates.get("current_version"))
+    if candidate is None or current is None:
+        return ""
+    if candidate <= current:
+        return ""
+    return UPDATE_NOTICE_FORMAT.format(version=".".join(str(n) for n in candidate))
+
+
+def append_update_notice(report_text: str, notice: str) -> str:
+    """Append the update notice as the VERY LAST line of the report.
+
+    The notice goes after the 模型消耗 block (it is always last). Empty notice
+    → the text is returned unchanged (byte-identical to the no-notice
+    baseline).
+    """
+    if not notice:
+        return report_text
+    return report_text + "\n" + notice

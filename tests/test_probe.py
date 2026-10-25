@@ -57,3 +57,28 @@ async def test_probe_render_flag(stub_agm):
     assert r.returncode == 0
     assert "Antigravity Tools 消耗情况" in r.stdout
     assert "账号（1）：" in r.stdout
+
+
+async def test_probe_check_updates_flag(stub_agm):
+    stub_agm.accounts_payload = make_accounts_payload([make_account("a1")])
+    stub_agm.updates_payload = {
+        "current_version": "5.0.0", "latest_version": "5.0.1",
+        "has_update": True, "download_url": "", "release_notes": "", "published_at": "",
+    }
+    r = await run_probe(
+        ["--base-url", stub_agm.base_url, "--check-updates", "--render"],
+        env_password="dummy-password")
+    assert r.returncode == 0
+    assert "updates: current=5.0.0 latest=5.0.1 has_update=True" in r.stdout
+    assert "AGM 有更新，最新版本号v5.0.1" in r.stdout
+    # The notice is the report's last line.
+    assert r.stdout.strip().splitlines()[-1] == "AGM 有更新，最新版本号v5.0.1"
+    # A failed check must not fail the probe or hide the report.
+    stub_agm.status_map["updates"] = 500
+    r = await run_probe(
+        ["--base-url", stub_agm.base_url, "--check-updates", "--render"],
+        env_password="dummy-password")
+    assert r.returncode == 0
+    assert "updates: 失败" in r.stdout
+    assert "Antigravity Tools 消耗情况" in r.stdout
+    assert "AGM 有更新" not in r.stdout

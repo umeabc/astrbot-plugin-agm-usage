@@ -5,6 +5,10 @@ printed). Usage:
 
   AGM_ADMIN_PASSWORD=... python tools/probe_agm.py --base-url http://host:port
   AGM_ADMIN_PASSWORD=... python tools/probe_agm.py --base-url http://host:port --render
+  AGM_ADMIN_PASSWORD=... python tools/probe_agm.py --base-url http://host:port --check-updates
+
+--check-updates asks AGM to compare its own version against GitHub (one
+read-only POST /api/system/updates/check); it writes nothing on either side.
 
 Exit codes: 0 ok; 2 transport; 3 auth; 4 schema/json; 5 other.
 """
@@ -43,7 +47,11 @@ from astrbot_plugin_agm_usage.client import (  # noqa: E402
     AGMUnavailableError,
 )
 from astrbot_plugin_agm_usage.models import UsageReport, compute_window  # noqa: E402
-from astrbot_plugin_agm_usage.reporting import format_report, merge_model_windows  # noqa: E402
+from astrbot_plugin_agm_usage.reporting import (  # noqa: E402
+    derive_update_notice,
+    format_report,
+    merge_model_windows,
+)
 
 EXIT_OK = 0
 EXIT_TRANSPORT = 2
@@ -62,7 +70,8 @@ def exit_code_for(exc: AGMError) -> int:
     return EXIT_OTHER
 
 
-async def run(base_url: str, password: str, timezone: str, render: bool) -> int:
+async def run(base_url: str, password: str, timezone: str, render: bool,
+              check_updates: bool = False) -> int:
     async with aiohttp.ClientSession(trust_env=False) as session:
         client = AGMClient(base_url=base_url, admin_password=password,
                            session=session, timeout_seconds=15.0)
@@ -100,6 +109,21 @@ async def run(base_url: str, password: str, timezone: str, render: bool) -> int:
             m168 = await client.model_stats(168)
             models = merge_model_windows(m24.value, m168.value)
             print(f"models: 24h n={len(m24.value)}, 7d n={len(m168.value)}")
+            notice = ""
+            if check_updates:
+                # AGM asks GitHub itself; a failure here is reported but never
+                # fatal for the rest of the probe.
+                try:
+                    upd = await client.check_updates()
+                except AGMError as exc:
+                    print(f"updates: 失败 ({exc.code})")
+                else:
+                    payload = upd.value if isinstance(upd.value, dict) else {}
+                    print(f"updates: current={payload.get('current_version')} "
+                          f"latest={payload.get('latest_version')} "
+                          f"has_update={payload.get('has_update')}")
+                    notice = derive_update_notice(payload)
+                    print(f"updates: notice={notice or '（无）'}")
             if render:
                 report = UsageReport(
                     instance="AGM", window=window,
@@ -107,7 +131,10 @@ async def run(base_url: str, password: str, timezone: str, render: bool) -> int:
                     accounts=acc.value, models=models,
                 )
                 print("---- /agm render ----")
-                print(format_report(report))
+                text = format_report(report)
+                if notice:
+                    text = text + "\n" + notice
+                print(text)
             return EXIT_OK
         except AGMError as exc:
             print(f"ERROR: {type(exc).__name__} ({exc.code})", file=sys.stderr)
@@ -120,6 +147,9 @@ def main() -> int:
     parser.add_argument("--timezone", default="Asia/Shanghai")
     parser.add_argument("--render", action="store_true",
                         help="also render the full /agm report text")
+    parser.add_argument("--check-updates", action="store_true",
+                        help="also ask AGM to check GitHub for its latest version "
+                             "(one read-only POST /api/system/updates/check)")
     args = parser.parse_args()
     password = os.environ.get("AGM_ADMIN_PASSWORD") or ""
     if not password:
@@ -127,7 +157,8 @@ def main() -> int:
 
         password = getpass.getpass("AGM admin password: ")
     try:
-        return asyncio.run(run(args.base_url, password, args.timezone, args.render))
+        return asyncio.run(run(args.base_url, password, args.timezone, args.render,
+                               args.check_updates))
     except KeyboardInterrupt:
         return EXIT_OTHER
 

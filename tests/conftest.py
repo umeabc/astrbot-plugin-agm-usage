@@ -147,12 +147,18 @@ class StubAGM:
 
     def __init__(self) -> None:
         self.password = "dummy-password"
-        self.health_payload = {"status": "ok", "version": "4.9.8"}
+        self.health_payload = {"status": "ok", "version": "5.0.0"}
         self.accounts_payload = make_accounts_payload()
         self.summary_payload = make_summary()
         self.models_payload = []
         self.daily_payload = []
         self.weekly_payload = []
+        # POST /api/system/updates/check (AGM UpdateInfo shape)
+        self.updates_payload = {
+            "current_version": "5.0.0", "latest_version": "5.0.0",
+            "has_update": False, "download_url": "", "release_notes": "",
+            "published_at": "",
+        }
         self.calls: list[dict] = []
         self.summary_calls: list[dict] = []
         # knobs
@@ -170,6 +176,7 @@ class StubAGM:
         app.router.add_get("/api/stats/models", self._models)
         app.router.add_get("/api/stats/daily", self._daily)
         app.router.add_get("/api/stats/weekly", self._weekly)
+        app.router.add_post("/api/system/updates/check", self._updates_check)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, "127.0.0.1", 0)
@@ -185,7 +192,8 @@ class StubAGM:
 
     async def _serve(self, request: web.Request, name: str, payload: Any):
         status = self.status_map.get(name)
-        self.calls.append({"name": name, "auth": request.headers.get("Authorization"),
+        self.calls.append({"name": name, "method": request.method,
+                           "auth": request.headers.get("Authorization"),
                            "query": dict(request.query)})
         delay = self.delay_map.get(name)
         if delay:
@@ -229,6 +237,10 @@ class StubAGM:
 
     async def _weekly(self, request):
         return await self._serve(request, "weekly", self.weekly_payload)
+
+    async def _updates_check(self, request):
+        # AGM's POST /api/system/updates/check returns its UpdateInfo struct.
+        return await self._serve(request, "updates", self.updates_payload)
 
 
 @pytest_asyncio.fixture()

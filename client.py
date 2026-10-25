@@ -1,9 +1,13 @@
-"""Async AGM admin API client (aiohttp only, read-only GETs).
+"""Async AGM admin API client (aiohttp; GETs plus one read-only POST).
 
 Error taxonomy: AGMError (base) with ``code`` in
 {auth, rate_limit, server, unavailable, json, schema, too_large, timeout}.
 Authorization: ``Authorization: Bearer <admin_password>`` on every request
 except /api/health. The password is never logged or embedded in exceptions.
+
+The single non-GET request is ``POST /api/system/updates/check``, which asks
+the AGM instance to compare its own version against GitHub and return the
+result; it reads nothing else and persists nothing.
 """
 from __future__ import annotations
 
@@ -237,6 +241,17 @@ def validate_accounts(raw: Any) -> Tuple:
                     _validate_quota_group(g, f"accounts[{i}].quota.quota_groups[{j}]")
                     for j, g in enumerate(groups_raw)
                 )
+        # AGM >= 5.0.0 QoS fields (absent on older AGM -> None). Tolerated
+        # leniently: an unknown state string is passed through for the
+        # renderer to ignore rather than failing the whole account list.
+        qos_status = entry.get("qos_status")
+        if not isinstance(qos_status, str) or not qos_status.strip():
+            qos_status = None
+        else:
+            qos_status = qos_status.strip()
+        qos_reset = entry.get("qos_reset_seconds")
+        if isinstance(qos_reset, bool) or not isinstance(qos_reset, int) or qos_reset < 0:
+            qos_reset = None
         result.append(
             AccountInfo(
                 id=acct_id,
@@ -250,6 +265,8 @@ def validate_accounts(raw: Any) -> Tuple:
                 quota_groups=groups,
                 subscription_tier=tier,
                 is_forbidden=is_forbidden,
+                qos_status=qos_status,
+                qos_reset_seconds=qos_reset,
             )
         )
     return tuple(result)
@@ -329,14 +346,17 @@ class AGMClient:
         except (ValueError, UnicodeDecodeError) as exc:
             raise AGMJsonError("response is not valid JSON") from exc
 
-    async def _get(self, path: str, *, params: Mapping[str, str] | None = None,
-                   auth: bool = True) -> ClientResult:
-        """One GET request with the common error mapping. auth=False skips
-        the Authorization header (used by /api/health)."""
+    async def _request(self, method: str, path: str, *,
+                       params: Mapping[str, str] | None = None,
+                       auth: bool = True) -> ClientResult:
+        """One request with the common error mapping. auth=False skips the
+        Authorization header (used by /api/health). Shared by GET and the
+        single POST this client may issue (/api/system/updates/check)."""
         headers = {"Authorization": f"Bearer {self._password}"} if auth else {}
         started = asyncio.get_running_loop().time()
         try:
-            async with self._session.get(
+            async with self._session.request(
+                method,
                 self._url(path),
                 params=dict(params) if params else None,
                 headers=headers,
@@ -378,6 +398,10 @@ class AGMClient:
             # timer really fired: the exception type itself is TimeoutError.
             raise AGMTimeoutError(f"timeout on {path}") from exc
 
+    async def _get(self, path: str, *, params: Mapping[str, str] | None = None,
+                   auth: bool = True) -> ClientResult:
+        return await self._request("GET", path, params=params, auth=auth)
+
     async def health(self) -> ClientResult:
         result = await self._get("/api/health", auth=False)
         status, version = validate_health(result.value)
@@ -408,3 +432,22 @@ class AGMClient:
         """
         result = await self._get("/api/stats/weekly", params={"weeks": str(weeks)})
         return ClientResult(value=validate_daily(result.value), observation=result.observation)
+
+    async def check_updates(self) -> ClientResult:
+        """POST /api/system/updates/check — AGM's own update check.
+
+        AGM performs the GitHub lookup (updater.json -> GitHub API -> raw
+        fallbacks) and returns its ``UpdateInfo`` payload:
+        ``current_version``, ``latest_version``, ``has_update``,
+        ``download_url``, ``release_notes``, ``published_at``.
+
+        This is the ONLY non-GET request this plugin ever issues, and it is
+        read-only in effect: AGM reads GitHub and returns the result without
+        persisting anything (its separate /system/updates/touch endpoint is
+        what stamps last_check_time — this plugin never calls that). It goes
+        through the same admin auth, byte cap and error taxonomy as every
+        other request, and needs the AGM host itself to be able to reach
+        GitHub; when it cannot, the failure is swallowed by the caller.
+        """
+        result = await self._request("POST", "/api/system/updates/check")
+        return ClientResult(value=result.value, observation=result.observation)
